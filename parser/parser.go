@@ -1,16 +1,13 @@
 // implementation is based on https://r2p.dev/b/2024-03-18-1brc-go/ all credits to the author
 
-package main
+package parser
 
 import (
-	"fmt"
 	"io"
 	"maps"
 	"os"
-	"runtime/pprof"
 	"slices"
 	"sync"
-	"time"
 )
 
 const READ_BUFFER_SIZE = 2048 * 2048
@@ -25,6 +22,21 @@ type TrashItem struct {
 var lock = &sync.Mutex{}
 var lockIdx = 0
 
+type parser struct {
+	temp Parser
+}
+
+type Parser interface {
+	ID(reading []byte, indexes []int) uint64
+	Size() int
+	Data(reading []byte, indexes []int) Parser
+	Persist(data map[uint64]any) error
+}
+
+func New(p Parser) *parser {
+	return &parser{temp: p}
+}
+
 func hash(name []byte) uint64 {
 	var h uint64 = 5381
 	for _, b := range name {
@@ -33,7 +45,7 @@ func hash(name []byte) uint64 {
 	return h
 }
 
-func consumer(file *os.File, trash chan *TrashItem, output chan map[uint64]any, wg *sync.WaitGroup) {
+func (p *parser) consumer(file *os.File, trash chan *TrashItem, output chan map[uint64]any, wg *sync.WaitGroup) {
 	defer wg.Done()
 	data := make(map[uint64]any, 1024)
 
@@ -74,7 +86,7 @@ func consumer(file *os.File, trash chan *TrashItem, output chan map[uint64]any, 
 
 		readingIndex := start
 		for readingIndex < final {
-			next := nextEnterpriseLine(readingIndex, readBuffer, data)
+			next := p.nextEnterpriseLine(readingIndex, readBuffer, data)
 			readingIndex = next
 		}
 	}
@@ -82,10 +94,10 @@ func consumer(file *os.File, trash chan *TrashItem, output chan map[uint64]any, 
 	output <- data
 }
 
-func saveCan(can []*TrashItem, data map[uint64]any, buffer []byte) []*TrashItem {
+func (p *parser) saveCan(can []*TrashItem, data map[uint64]any, buffer []byte) []*TrashItem {
 	for i, ref := range can {
 		if ref.Idx == 0 {
-			_ = nextEnterpriseLine(0, ref.Value, data)
+			_ = p.nextEnterpriseLine(0, ref.Value, data)
 			return slices.Delete(can, i, i+1)
 		}
 
@@ -100,9 +112,9 @@ func saveCan(can []*TrashItem, data map[uint64]any, buffer []byte) []*TrashItem 
 				}
 				total := len(ref.Value) + len(oth.Value)
 
-				end := nextEnterpriseLine(0, buffer, data)
+				end := p.nextEnterpriseLine(0, buffer, data)
 				if end < total {
-					_ = nextEnterpriseLine(end, buffer, data)
+					_ = p.nextEnterpriseLine(end, buffer, data)
 				}
 
 				if i > j {
@@ -121,9 +133,9 @@ func saveCan(can []*TrashItem, data map[uint64]any, buffer []byte) []*TrashItem 
 	return can
 }
 
-func run() {
+func (p *parser) Run(fileName string) {
 	// Read file
-	file, err := os.Open("./testdata/TEST.EMPRECSV")
+	file, err := os.Open(fileName)
 	if err != nil {
 		panic(err)
 	}
@@ -138,12 +150,12 @@ func run() {
 	wgTrash.Add(1)
 	trash := make(chan *TrashItem, N_WORKERS*2)
 	output := make(chan map[uint64]any, 1)
-	go trashBin(trash, output, &wgTrash)
+	go p.trashBin(trash, output, &wgTrash)
 	outputChannels[0] = output
 
 	for i := range N_WORKERS {
 		output := make(chan map[uint64]any, 1)
-		go consumer(file, trash, output, &wg)
+		go p.consumer(file, trash, output, &wg)
 		outputChannels[i+1] = output
 	}
 
@@ -160,10 +172,13 @@ func run() {
 		maps.Copy(data, <-outputChannels[i])
 	}
 
-	printResult(data)
+	err = p.temp.Persist(data)
+	if err != nil {
+		panic(err)
+	}
 }
 
-func trashBin(input chan *TrashItem, output chan map[uint64]any, wg *sync.WaitGroup) {
+func (p *parser) trashBin(input chan *TrashItem, output chan map[uint64]any, wg *sync.WaitGroup) {
 	defer wg.Done()
 	data := make(map[uint64]any, 1024)
 
@@ -172,43 +187,31 @@ func trashBin(input chan *TrashItem, output chan map[uint64]any, wg *sync.WaitGr
 
 	for item := range input {
 		can = append(can, item)
-		can = saveCan(can, data, buffer)
+		can = p.saveCan(can, data, buffer)
 	}
 
 	output <- data
 }
 
-func printResult(data map[uint64]any) {
-	print("[\n")
-	for _, k := range data {
-		switch v := (k).(type) {
-		case *EnterpriseData:
-			fmt.Printf(`  {"basic_cnpj":"%s","corporate_name":"%s","legal_nature":"%s","responsible_qualification":"%s","social_capital":"%s","company_size":"%s","federative_entity":"%s"}`+"\n", v.BasicCNPJ, v.CorporateName, v.LegalNature, v.ResponsibleQualification, v.SocialCapital, v.CompanySize, v.FederativeEntity)
-		}
-	}
-	print("]\n")
-}
+// func process() {
+// 	f, err := os.Create("cpu_profile.prof")
+// 	if err != nil {
+// 		panic(err)
+// 	}
+// 	defer f.Close()
 
-func process() {
-	f, err := os.Create("cpu_profile.prof")
-	if err != nil {
-		panic(err)
-	}
-	defer f.Close()
+// 	if err := pprof.StartCPUProfile(f); err != nil {
+// 		panic(err)
+// 	}
+// 	defer pprof.StopCPUProfile()
 
-	if err := pprof.StartCPUProfile(f); err != nil {
-		panic(err)
-	}
-	defer pprof.StopCPUProfile()
+// 	_ = time.Now()
+// 	New(&EnterpriseData{}).run()
+// 	// fmt.Printf("%0.6f\n", time.Since(started).Seconds())
+// }
 
-	_ = time.Now()
-	run()
-	// fmt.Printf("%0.6f\n", time.Since(started).Seconds())
-}
-
-func nextEnterpriseLine(readingIndex int, reading []byte, data map[uint64]any) int {
-	temp := &EnterpriseData{} // FIXME use dynamic type
-	size := temp.Size()
+func (p *parser) nextEnterpriseLine(readingIndex int, reading []byte, data map[uint64]any) int {
+	size := p.temp.Size()
 	fields := make([]int, size)
 
 	i := readingIndex + 1 // skip first "
@@ -228,8 +231,8 @@ func nextEnterpriseLine(readingIndex int, reading []byte, data map[uint64]any) i
 	}
 	fields[size-1] = i - 1 // skip last field "
 
-	id := temp.ID(reading, fields)
-	data[id] = temp.Data(reading, fields)
+	id := p.temp.ID(reading, fields)
+	data[id] = p.temp.Data(reading, fields)
 
 	readingIndex = i + 1
 	return readingIndex
