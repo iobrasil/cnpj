@@ -193,23 +193,6 @@ func (p *parser) trashBin(input chan *TrashItem, output chan map[uint64]any, wg 
 	output <- data
 }
 
-// func process() {
-// 	f, err := os.Create("cpu_profile.prof")
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// 	defer f.Close()
-
-// 	if err := pprof.StartCPUProfile(f); err != nil {
-// 		panic(err)
-// 	}
-// 	defer pprof.StopCPUProfile()
-
-// 	_ = time.Now()
-// 	New(&EnterpriseData{}).run()
-// 	// fmt.Printf("%0.6f\n", time.Since(started).Seconds())
-// }
-
 func (p *parser) nextEnterpriseLine(readingIndex int, reading []byte, data map[uint64]any) int {
 	size := p.temp.Size()
 	fields := make([]int, size)
